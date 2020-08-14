@@ -2,10 +2,11 @@ package raft
 
 // Put utils for the raft labs, for cleaner code.
 
-import( 
-	"time"
+import (
 	"math/rand"
+	"time"
 )
+
 func newRandDuration(min time.Duration) time.Duration {
 	extra := time.Duration(rand.Int63()) % min
 	return time.Duration(extra + min)
@@ -35,11 +36,10 @@ func (rf *Raft) canCommit(index int) bool {
 		majority, count := len(rf.peers)/2+1, 0
 		for j := 0; j < len(rf.peers); j++ {
 			if rf.matchIndex[j] >= index {
-				count += 1
+				count++
 			}
 		}
 		return count >= majority
-	} else {
-		return false
 	}
+	return false
 }

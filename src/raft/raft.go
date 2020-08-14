@@ -215,7 +215,7 @@ func (rf *Raft) sendLogEntry(follower int) {
 	prevLogTerm := rf.getEntry(prevLogIndex).LogTerm
 	args := AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me, PrevLogIndex: prevLogIndex, PrevLogTerm: prevLogTerm, CommitIndex: rf.commitIndex, Len: 0}
 	if rf.nextIndex[follower] < rf.logIndex {
-		// fill the log gap
+		// Fill the log data gap for this follower
 		entries := rf.getRangeEntry(rf.nextIndex[follower], rf.logIndex)
 		args.Entries = entries
 		args.Len = len(entries)
@@ -228,6 +228,9 @@ func (rf *Raft) sendLogEntry(follower int) {
 		DPrintf("[%d] get AppendEntries reply from [%d]", rf.me, follower)
 		// Lock after the RPC finished.
 		rf.mu.Lock()
+		defer rf.mu.Unlock()
+
+		// Reply is not successful, early return.
 		if !reply.Success {
 			if reply.Term > rf.currentTerm { // the leader is obsolete
 				rf.becomeFollower(reply.Term)
@@ -237,23 +240,26 @@ func (rf *Raft) sendLogEntry(follower int) {
 				rf.nextIndex[follower] = Max(1, Min(reply.ConflictIndex, rf.logIndex))
 				// TODO
 			}
-		} else { // reply is successful
-			// Update the our local record (for index) for this followers
-			prevLogIndex, logEntriesLen := args.PrevLogIndex, args.Len
-			if prevLogIndex+logEntriesLen+1 > rf.nextIndex[follower] {
-				rf.nextIndex[follower] = prevLogIndex + logEntriesLen + 1 // update
-				rf.matchIndex[follower] = prevLogIndex + logEntriesLen    // update
-			}
 
-			// Commit Index
-			toCommitIndex := prevLogIndex + logEntriesLen
-			if rf.canCommit(toCommitIndex) {
-				rf.commitIndex = toCommitIndex
-				rf.notifyApplyCh <- struct{}{}
-			}
+			return
 		}
 
-		rf.mu.Unlock()
+		// Reply is successful
+
+		prevLogIndex, logEntriesLen := args.PrevLogIndex, args.Len
+		if prevLogIndex+logEntriesLen+1 > rf.nextIndex[follower] {
+			// Update the our local record (for index) for this follower.
+			rf.nextIndex[follower] = prevLogIndex + logEntriesLen + 1
+			rf.matchIndex[follower] = prevLogIndex + logEntriesLen
+		}
+
+		// Update Commit Index if logs have been replicated to majority of followers.
+		toCommitIndex := prevLogIndex + logEntriesLen
+		if rf.canCommit(toCommitIndex) {
+			rf.commitIndex = toCommitIndex
+			rf.notifyApplyCh <- struct{}{}
+		}
+
 	}
 }
 
@@ -261,7 +267,7 @@ func (rf *Raft) replicate() {
 	DPrintf("[%d] is replicate()", rf.me)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	for follower := 0; follower < len(rf.peers); follower += 1 {
+	for follower := 0; follower < len(rf.peers); follower++ {
 		if follower != rf.me {
 			go rf.sendLogEntry(follower)
 		}
@@ -303,7 +309,7 @@ func (rf *Raft) campaign() {
 	// • Send RequestVote RPCs to all other servers
 	rf.state = Candidate
 	rf.leaderId = -1
-	rf.currentTerm += 1
+	rf.currentTerm++
 	rf.votedFor = rf.me
 
 	term := rf.currentTerm
@@ -384,13 +390,13 @@ func (rf *Raft) apply() {
 			var entries []LogEntry
 			if rf.lastApplied < rf.logIndex && rf.lastApplied < rf.commitIndex {
 				commandValid = true
-				entries = rf.getRangeEntry(rf.lastApplied + 1, rf.commitIndex + 1)
+				entries = rf.getRangeEntry(rf.lastApplied+1, rf.commitIndex+1)
 				rf.lastApplied = rf.commitIndex
 			}
 			rf.mu.Unlock()
 
 			// Notify rf.applyCh
-			for _, entry := range(entries) {
+			for _, entry := range entries {
 				rf.applyCh <- ApplyMsg{CommandValid: commandValid, CommandIndex: entry.LogIndex, CommandTerm: entry.LogTerm, Command: entry.Command}
 			}
 		}

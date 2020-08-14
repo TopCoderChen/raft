@@ -6,22 +6,25 @@ package raft
 
 // Servers retry RPCs if they do not receive a response in a timely manner.
 
+// AppendEntriesArgs is the params for AppendEntries RPC
 type AppendEntriesArgs struct {
 	Term,
 	LeaderId,
 	PrevLogIndex,
 	PrevLogTerm,
-	CommitIndex int
-	Len     int        // number of logs sends to follower
+	CommitIndex int // "leaderCommit" in the paper
 	Entries []LogEntry // logs that send to follower
+
+	Len int // number of logs sends to follower (optional info)
 }
 
+// AppendEntriesReply is the reply for AppendEntries RPC
 type AppendEntriesReply struct {
 	// true if follower contained entry matching prevLogIndex and prevLogTerm
 	Success bool
 	// max(request.term, rf Local Term)
 	Term int
-	// in case of conflicting, follower include the first index it store for conflict term
+	// In case of conflicting, follower include the first index it store for conflict term
 	// This is for keeping the log consistency between follower and leader
 	ConflictIndex int
 }
@@ -102,13 +105,18 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.resetElectionTimer(newRandDuration(electionTimeout))
 }
 
-// AppendEntries RPC handler
+// AppendEntries RPC handler.
 // Consistency check performed by AppendEntries:
 // When sending an AppendEntries RPC, the leader includes the index
 // and term of the entry in its log that immediately precedes
 // the new entries. If the follower does not find an entry in
 // its log with the same index and term, then it refuses the
 // new entries.
+
+// When it gets a successful response from the majority of nodes, the command is committed and the client gets a confirmation;
+// In the next AppendEntries RPC sent to the follower (that can be a new entry or just a heartbeat), the follower also commits the message;
+// The AppendEntries RPC implements a consistency check, to guarantee its local log is consistent with the leader’s
+
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -121,7 +129,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// Transition to follower
 	rf.leaderId = args.LeaderId
-	rf.resetElectionTimer(newRandDuration(electionTimeout)) // reset electionTimer
+	// Reset electionTimer
+	rf.resetElectionTimer(newRandDuration(electionTimeout))
 	if args.Term > rf.currentTerm {
 		rf.currentTerm, rf.votedFor = args.Term, -1
 	}
@@ -129,13 +138,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	logIndex := rf.logIndex
 	prevLogIndex := args.PrevLogIndex
-	// follower don't agree with leader on last log entry (index or term mismatch)
+	// Server has wrong information about this follower.
+	// The index could be either bigger or smaller, or term doesn't match.
+	// Follower don't agree with leader on last log entry.
 	if logIndex <= prevLogIndex || rf.getEntry(prevLogIndex).LogTerm != args.PrevLogTerm {
 		conflictIndex := Min(rf.logIndex-1, prevLogIndex)
 		conflictTerm := rf.getEntry(conflictIndex).LogTerm
-		// find the smallest conflictIndex
-		for conflictIndex > rf.commitIndex && rf.getEntry(conflictIndex - 1).LogTerm == conflictTerm {
-			conflictIndex -= 1
+		// Find the smallest conflictIndex
+		for conflictIndex > rf.commitIndex && rf.getEntry(conflictIndex-1).LogTerm == conflictTerm {
+			conflictIndex--
 		}
 		reply.Success, reply.ConflictIndex = false, conflictIndex
 		return
@@ -143,32 +154,38 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	reply.Success, reply.ConflictIndex = true, -1
 
-	// Delete any conflicting log entries
+	// Find the first starting diff point & Delete any conflicting log entries.
+	// Notice this i is global here !
 	i := 0
 	for ; i < args.Len; i++ {
 		if prevLogIndex+1+i >= rf.logIndex {
 			break
 		}
 		if rf.getEntry(prevLogIndex+1+i).LogTerm != args.Entries[i].LogTerm {
+			// Find the turning point of diff !
 			rf.logIndex = prevLogIndex + 1 + i
-			// delete any conflicting log entries
+			// Delete any conflicting log entries
 			rf.log = append(rf.log[:prevLogIndex+1+i])
 			break
 		}
 	}
 
-	// After deletion, append fresh logs
+	// After deletion, append the remaining logs from master.
 	for ; i < args.Len; i++ {
 		rf.log = append(rf.log, args.Entries[i])
-		rf.logIndex += 1
+		rf.logIndex++
 	}
 
+	// Sync the commit-index if necessary.
 	oldCommitIndex := rf.commitIndex
-	rf.commitIndex = Max(rf.commitIndex, Min(args.CommitIndex, args.PrevLogIndex+args.Len))
+	// Min(server commit index, local replicated index)
+	if potentialNewCommit := Min(args.CommitIndex, args.PrevLogIndex+args.Len); potentialNewCommit > rf.commitIndex {
+		rf.commitIndex = potentialNewCommit
+	}
 	if rf.commitIndex > oldCommitIndex {
 		rf.notifyApplyCh <- struct{}{}
 	}
 
 	// reset electionTimer
-	rf.resetElectionTimer(newRandDuration(electionTimeout)) 
+	rf.resetElectionTimer(newRandDuration(electionTimeout))
 }

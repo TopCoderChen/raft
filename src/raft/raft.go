@@ -336,6 +336,8 @@ func (rf *Raft) sendLogEntry(follower int) {
 		if rf.canCommit(toCommitIndex) {
 			rf.commitIndex = toCommitIndex
 			rf.persist()
+
+			// Key: avoid blocking here !!!
 			rf.notifyApplyCh <- struct{}{}
 		}
 
@@ -423,23 +425,26 @@ func (rf *Raft) apply() {
 		case <-rf.shutdown:
 			return
 		case <-rf.notifyApplyCh:
-			rf.mu.Lock()
-			var commandValid bool
-			var entries []LogEntry
-			if rf.lastApplied < rf.logIndex && rf.lastApplied < rf.commitIndex {
-				commandValid = true
-				entries = rf.getRangeEntry(rf.lastApplied+1, rf.commitIndex+1)
-				rf.lastApplied = rf.commitIndex
-			}
+			// receiver may block sender, so use another goroutine
+			go func() {
+				rf.mu.Lock()
+				var commandValid bool
+				var entries []LogEntry
+				if rf.lastApplied < rf.logIndex && rf.lastApplied < rf.commitIndex {
+					commandValid = true
+					entries = rf.getRangeEntry(rf.lastApplied+1, rf.commitIndex+1)
+					rf.lastApplied = rf.commitIndex
+				}
 
-			rf.persist()
+				rf.persist()
 
-			rf.mu.Unlock()
+				rf.mu.Unlock()
 
-			// Notify rf.applyCh
-			for _, entry := range entries {
-				rf.applyCh <- ApplyMsg{CommandValid: commandValid, CommandIndex: entry.LogIndex, CommandTerm: entry.LogTerm, Command: entry.Command}
-			}
+				// Notify rf.applyCh
+				for _, entry := range entries {
+					rf.applyCh <- ApplyMsg{CommandValid: commandValid, CommandIndex: entry.LogIndex, CommandTerm: entry.LogTerm, Command: entry.Command}
+				}
+			}()
 		}
 	}
 }
@@ -468,7 +473,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.applyCh = applyCh
 	rf.shutdown = make(chan struct{})
+
+	// Using buffered channel also works, without the need of goroutine in receiver.
 	rf.notifyApplyCh = make(chan struct{})
+
 	rf.electionTimer = time.NewTimer(newRandDuration(electionTimeout))
 
 	// initialize from state persisted before a crash

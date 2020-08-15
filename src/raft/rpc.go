@@ -6,56 +6,6 @@ package raft
 
 // Servers retry RPCs if they do not receive a response in a timely manner.
 
-// AppendEntriesArgs is the params for AppendEntries RPC
-type AppendEntriesArgs struct {
-	Term,
-	LeaderId,
-	PrevLogIndex,
-	PrevLogTerm,
-	CommitIndex int // "leaderCommit" in the paper
-	Entries []LogEntry // logs that send to follower
-
-	Len int // number of logs sends to follower (optional info)
-}
-
-// AppendEntriesReply is the reply for AppendEntries RPC
-type AppendEntriesReply struct {
-	// true if follower contained entry matching prevLogIndex and prevLogTerm
-	Success bool
-	// max(request.term, rf Local Term)
-	Term int
-	// In case of conflicting, follower include the first index it store for conflict term
-	// This is for keeping the log consistency between follower and leader
-	ConflictIndex int
-}
-
-//
-// example RequestVote RPC arguments structure.
-// field names must start with capital letters!
-//
-type RequestVoteArgs struct {
-	// Your data here (2A, 2B).
-	Term         int
-	CandidateId  int
-	LastLogIndex int
-	LastLogTerm  int
-}
-
-//
-// example RequestVote RPC reply structure.
-// field names must start with capital letters!
-//
-type RequestVoteReply struct {
-	// Your data here (2A).
-	Term        int
-	VoteGranted bool
-	Err         Err // Err is string defined by "type Err string"
-	Server      int // the server who sent this reply msg
-}
-
-//
-// example RequestVote RPC handler.
-//
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()

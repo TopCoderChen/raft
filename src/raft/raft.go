@@ -19,8 +19,10 @@ package raft
 import (
 	// "bytes"
 	// crand "crypto/rand"
-	// "labgob"
-	// "labrpc"
+	"math/rand"
+
+	"../labgob"
+
 	"../labrpc"
 	// "log"
 	// "math/big"
@@ -33,6 +35,9 @@ import (
 // import "bytes"
 // import "../labgob"
 
+const electionTimeout = time.Duration(500 * time.Millisecond)
+const AppendEntriesInterval = time.Duration(100 * time.Millisecond)
+
 //
 // as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
@@ -44,21 +49,20 @@ import (
 // snapshots) on the applyCh; at that point you can add fields to
 // ApplyMsg, but set CommandValid to false for these other uses.
 //
-type ApplyMsg struct {
-	CommandValid bool
-	Command      interface{}
-	CommandIndex int
-	CommandTerm  int
+
+func init() {
+	labgob.Register(LogEntry{})
+	// max := big.NewInt(int64(1) << 62)
+	// bigx, _ := crand.Int(crand.Reader, max)
+	// seed := bigx.Int64()
+	// rand.Seed(seed)
+	// log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 }
 
-type LogEntry struct {
-	LogTerm  int
-	LogIndex int
-	Command  interface{}
+func newRandDuration(min time.Duration) time.Duration {
+	extra := time.Duration(rand.Int63()) % min
+	return time.Duration(extra + min)
 }
-
-const electionTimeout = time.Duration(500 * time.Millisecond)
-const AppendEntriesInterval = time.Duration(100 * time.Millisecond)
 
 //
 // A Go object implementing a single Raft peer.
@@ -88,6 +92,8 @@ type Raft struct {
 	lastApplied int // index of highest log entry applied to state machine, initialized to 0  (for snapshot ??)
 	logIndex    int // index of log to be stored next
 
+	lastIncludedIndex int // snapshot
+
 	// Volatile state on leaders.
 	// nextIndex: 下一个 还未send 的 log 的 index, for each peer raft server.
 	nextIndex  []int
@@ -98,6 +104,21 @@ type Raft struct {
 	shutdown      chan struct{} // for close()
 	notifyApplyCh chan struct{} // for send msg to applyCh to the client
 	electionTimer *time.Timer   // for leader election
+}
+
+func (rf *Raft) resetElectionTimer(duration time.Duration) {
+	rf.electionTimer.Stop()
+	rf.electionTimer.Reset(duration)
+}
+
+// After a leader comes to power, it calls this function to initialize nextIndex and matchIndex
+func (rf *Raft) initIndex() {
+	peersNum := len(rf.peers)
+	rf.nextIndex, rf.matchIndex = make([]int, peersNum), make([]int, peersNum)
+	for i := 0; i < peersNum; i++ {
+		rf.nextIndex[i] = rf.logIndex
+		rf.matchIndex[i] = 0
+	}
 }
 
 // return currentTerm and whether this server
@@ -176,14 +197,36 @@ func (rf *Raft) readPersist(data []byte) {
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 //
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	return ok
+
+// because snapshot will replace committed log entries in log
+// thus the length of rf.log is different from(less than or equal) rf.logIndex
+func (rf *Raft) getOffsetIndex(i int) int {
+	return i - rf.lastIncludedIndex
 }
 
-func (rf *Raft) resetElectionTimer(duration time.Duration) {
-	rf.electionTimer.Stop()
-	rf.electionTimer.Reset(duration)
+func (rf *Raft) getEntry(i int) LogEntry {
+	offsetIndex := rf.getOffsetIndex(i)
+	return rf.log[offsetIndex]
+}
+
+func (rf *Raft) getRangeEntry(fromInclusive, toExclusive int) []LogEntry {
+	from := rf.getOffsetIndex(fromInclusive)
+	to := rf.getOffsetIndex(toExclusive)
+	return append([]LogEntry{}, rf.log[from:to]...)
+}
+
+// Check raft can commit log entry at index (if majority agrees on the match)
+func (rf *Raft) canCommit(index int) bool {
+	if index < rf.logIndex && rf.commitIndex < index && rf.getEntry(index).LogTerm == rf.currentTerm {
+		majority, count := len(rf.peers)/2+1, 0
+		for j := 0; j < len(rf.peers); j++ {
+			if rf.matchIndex[j] >= index {
+				count++
+			}
+		}
+		return count >= majority
+	}
+	return false
 }
 
 func (rf *Raft) becomeFollower(term int) {
@@ -510,6 +553,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 	rf.logIndex = 1
+
+	rf.lastIncludedIndex = 0
 
 	rf.applyCh = applyCh
 	rf.shutdown = make(chan struct{})

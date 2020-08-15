@@ -52,6 +52,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.VoteGranted = true
 	rf.votedFor = args.CandidateId
 
+	rf.persist()
+
 	rf.resetElectionTimer(newRandDuration(electionTimeout))
 }
 
@@ -138,4 +140,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// reset electionTimer
 	rf.resetElectionTimer(newRandDuration(electionTimeout))
+
+	rf.persist()
 }

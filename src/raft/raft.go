@@ -19,6 +19,8 @@ package raft
 import (
 	// "bytes"
 	// crand "crypto/rand"
+	"bytes"
+	"log"
 	"math/rand"
 
 	"../labgob"
@@ -130,6 +132,19 @@ func (rf *Raft) GetState() (int, bool) {
 	return rf.currentTerm, rf.state == Leader
 }
 
+func (rf *Raft) getPersistState() []byte {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	// e.Encode(rf.lastIncludedIndex)
+	e.Encode(rf.logIndex)
+	e.Encode(rf.commitIndex)
+	e.Encode(rf.lastApplied)
+	e.Encode(rf.log)
+	return w.Bytes()
+}
+
 //
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
@@ -142,8 +157,8 @@ func (rf *Raft) persist() {
 	// e := labgob.NewEncoder(w)
 	// e.Encode(rf.xxx)
 	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	data := rf.getPersistState()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -166,6 +181,19 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	currentTerm, votedFor, logIndex, commitIndex, lastApplied := 0, 0, 0, 0, 0
+	if d.Decode(&currentTerm) != nil ||
+		d.Decode(&votedFor) != nil ||
+		// d.Decode(&lastIncludedIndex) != nil ||
+		d.Decode(&logIndex) != nil ||
+		d.Decode(&commitIndex) != nil ||
+		d.Decode(&lastApplied) != nil ||
+		d.Decode(&rf.log) != nil {
+		log.Fatal("!!! \n\n Error unmarshaling raft state \n\n")
+	}
+	rf.currentTerm, rf.votedFor, rf.logIndex, rf.commitIndex, rf.lastApplied = currentTerm, votedFor, logIndex, commitIndex, lastApplied
 }
 
 //
@@ -229,10 +257,11 @@ func (rf *Raft) canCommit(index int) bool {
 	return false
 }
 
-func (rf *Raft) becomeFollower(term int) {
+func (rf *Raft) stepDown(term int) {
 	rf.currentTerm = term
 	rf.state = Follower
 	rf.votedFor, rf.leaderId = -1, -1
+	rf.persist()
 	rf.resetElectionTimer(newRandDuration(electionTimeout))
 }
 
@@ -276,7 +305,7 @@ func (rf *Raft) sendLogEntry(follower int) {
 		// Reply is not successful, early return.
 		if !reply.Success {
 			if reply.Term > rf.currentTerm { // the leader is obsolete
-				rf.becomeFollower(reply.Term)
+				rf.stepDown(reply.Term)
 			} else {
 				// follower is inconsistent with leader
 				// force follower's data to be overwritten by resetting index.
@@ -300,6 +329,7 @@ func (rf *Raft) sendLogEntry(follower int) {
 		toCommitIndex := prevLogIndex + logEntriesLen
 		if rf.canCommit(toCommitIndex) {
 			rf.commitIndex = toCommitIndex
+			rf.persist()
 			rf.notifyApplyCh <- struct{}{}
 		}
 
@@ -359,6 +389,9 @@ func (rf *Raft) campaign() {
 	candidateId := rf.me
 	lastLogIndex := rf.logIndex - 1
 	lastLogTerm := rf.getEntry(lastLogIndex).LogTerm
+
+	rf.persist()
+
 	args := RequestVoteArgs{Term: term, CandidateId: candidateId, LastLogIndex: lastLogIndex, LastLogTerm: lastLogTerm}
 
 	// reset election Timer
@@ -398,8 +431,8 @@ func (rf *Raft) campaign() {
 			} else {
 				rf.mu.Lock()
 				if reply.Term > rf.currentTerm {
-					DPrintf("[%d] becomeFollower from [%d]", rf.me, reply.Server)
-					rf.becomeFollower(reply.Term)
+					DPrintf("[%d] stepDown from [%d]", rf.me, reply.Server)
+					rf.stepDown(reply.Term)
 				}
 				rf.mu.Unlock()
 			}
@@ -436,6 +469,9 @@ func (rf *Raft) apply() {
 				entries = rf.getRangeEntry(rf.lastApplied+1, rf.commitIndex+1)
 				rf.lastApplied = rf.commitIndex
 			}
+
+			rf.persist()
+
 			rf.mu.Unlock()
 
 			// Notify rf.applyCh
@@ -492,7 +528,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.matchIndex[rf.me] = index
 
 	// Advance the index !!!
-	rf.logIndex += 1
+	rf.logIndex++
+
+	rf.persist()
 
 	go rf.replicate()
 

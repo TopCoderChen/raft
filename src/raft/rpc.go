@@ -90,6 +90,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	logIndex := rf.logIndex
 	prevLogIndex := args.PrevLogIndex
+
+	// Follower has snapshot locally, server has stale info.
+	if prevLogIndex < rf.lastIncludedIndex {
+		reply.Success, reply.ConflictIndex = false, rf.lastIncludedIndex+1
+		return
+	}
+
 	// Server has wrong information about this follower.
 	// The index could be either bigger or smaller, or term doesn't match.
 	// Follower don't agree with leader on last log entry.
@@ -115,9 +122,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 		if rf.getEntry(prevLogIndex+1+i).LogTerm != args.Entries[i].LogTerm {
 			// Find the turning point of diff !
-			rf.logIndex = prevLogIndex + 1 + i
-			// Delete any conflicting log entries
-			rf.log = append(rf.log[:prevLogIndex+1+i])
+			truncationEndIndex := rf.getOffsetIndex(rf.logIndex)
+			rf.log = append(rf.log[:truncationEndIndex]) // delete any conflicting log entries
 			break
 		}
 	}
@@ -141,5 +147,51 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// reset electionTimer
 	rf.resetElectionTimer(newRandDuration(electionTimeout))
 
+	rf.persist()
+}
+
+// Lab 3B
+
+// Usually the snapshot will contain new information
+// not already in the recipient’s log. In this case, the follower
+// discards its entire log; it is all superseded by the snapshot.
+
+// If instead the follower receives a snapshot that describes a prefix of its log,
+// then log entries covered by the snapshot are deleted but entries following the snapshot are still
+// valid and must be retained.
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	reply.Err = OK
+	reply.Term = rf.currentTerm
+	if args.Term < rf.currentTerm {
+		return
+	}
+
+	// Only leader could send snapshot RPC.
+	rf.leaderId = args.LeaderId
+
+	// New potential snapshot data.
+	if args.LastIncludedIndex > rf.lastIncludedIndex {
+		truncationStartIndex := rf.getOffsetIndex(args.LastIncludedIndex)
+		rf.lastIncludedIndex = args.LastIncludedIndex
+		oldCommitIndex := rf.commitIndex
+		rf.commitIndex = Max(rf.commitIndex, rf.lastIncludedIndex)
+		rf.logIndex = Max(rf.logIndex, rf.lastIncludedIndex+1)
+
+		if truncationStartIndex < len(rf.log) {
+			// snapshot is just prefix, then discard prefix logs.
+			rf.log = append(rf.log[truncationStartIndex:])
+		} else {
+			// snapshot contain new information, discard entire log.
+			rf.log = []LogEntry{{LogIndex: args.LastIncludedIndex, LogTerm: args.LastIncludedTerm, Command: nil}}
+		}
+		rf.persister.SaveStateAndSnapshot(rf.getPersistState(), args.Data)
+		if rf.commitIndex > oldCommitIndex {
+			rf.notifyApplyCh <- struct{}{}
+		}
+	}
+
+	rf.resetElectionTimer(newRandDuration(electionTimeout))
 	rf.persist()
 }

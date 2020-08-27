@@ -152,6 +152,7 @@ func (rf *Raft) readPersist(data []byte) {
 }
 
 // When kvraft starts, it needs replay all the applied commands in raft, starting from last-snapshotted-index.
+// Lab 3B.
 func (rf *Raft) Replay(startIndex int) {
 	rf.mu.Lock()
 	if startIndex <= rf.lastIncludedIndex {
@@ -179,7 +180,7 @@ func (rf *Raft) PersistAndSaveSnapshot(lastIncludedIndex int, snapshot []byte) {
 	}
 }
 
-// because snapshot will replace committed log entries in log
+// Because snapshot will replace committed log entries in log
 // thus the length of rf.log is different from(less than or equal) rf.logIndex
 func (rf *Raft) getOffsetIndex(i int) int {
 	return i - rf.lastIncludedIndex
@@ -308,6 +309,33 @@ func (rf *Raft) campaign() {
 	rf.mu.Unlock()
 }
 
+// InstallSnapshot to follower, send leader's snapshot data to follower.
+// Lab 3B.
+func (rf *Raft) sendSnapshot(follower int) {
+	rf.mu.Lock()
+	if rf.state != Leader {
+		rf.mu.Unlock()
+		return
+	}
+
+	args := InstallSnapshotArgs{Term: rf.currentTerm, LeaderId: rf.me, LastIncludedIndex: rf.lastIncludedIndex,
+		LastIncludedTerm: rf.getEntry(rf.lastIncludedIndex).LogTerm, Data: rf.persister.ReadSnapshot()}
+
+	rf.mu.Unlock()
+
+	var reply InstallSnapshotReply
+	if rf.peers[follower].Call("Raft.InstallSnapshot", &args, &reply) {
+		rf.mu.Lock()
+		if reply.Term > rf.currentTerm {
+			rf.stepDown(reply.Term)
+		} else {
+			rf.nextIndex[follower] = Max(rf.nextIndex[follower], rf.lastIncludedIndex+1)
+			rf.matchIndex[follower] = Max(rf.matchIndex[follower], rf.lastIncludedIndex)
+		}
+		rf.mu.Unlock()
+	}
+}
+
 // Send AppendEntries RPC call to the follower and handle reply.
 // sendLogEntry(follower int)
 func (rf *Raft) sendLogEntry(follower int) {
@@ -317,6 +345,14 @@ func (rf *Raft) sendLogEntry(follower int) {
 		rf.mu.Unlock()
 		return
 	}
+
+	// Send install-snapshot to lagged follower.
+	if rf.nextIndex[follower] <= rf.lastIncludedIndex {
+		go rf.sendSnapshot(follower)
+		rf.mu.Unlock()
+		return
+	}
+
 	// Prepare the AppendEntries request args
 	prevLogIndex := rf.nextIndex[follower] - 1
 	prevLogTerm := rf.getEntry(prevLogIndex).LogTerm
@@ -345,7 +381,9 @@ func (rf *Raft) sendLogEntry(follower int) {
 				// follower is inconsistent with leader
 				// force follower's data to be overwritten by resetting index.
 				rf.nextIndex[follower] = Max(1, Min(reply.ConflictIndex, rf.logIndex))
-				// TODO
+				if rf.nextIndex[follower] <= rf.lastIncludedIndex {
+					go rf.sendSnapshot(follower)
+				}
 			}
 
 			return
@@ -394,6 +432,7 @@ func (rf *Raft) tick() {
 		}
 	}
 }
+
 func (rf *Raft) replicate() {
 	DPrintf("[%d] is replicate()", rf.me)
 	rf.mu.Lock()
@@ -454,30 +493,39 @@ func (rf *Raft) apply() {
 		case <-rf.shutdown:
 			return
 		case <-rf.notifyApplyCh:
-			// receiver may block sender, so use another goroutine
-			go func() {
-				rf.mu.Lock()
-				var commandValid bool
-				var entries []LogEntry
-				if rf.lastApplied < rf.logIndex && rf.lastApplied < rf.commitIndex {
-					commandValid = true
-					entries = rf.getRangeEntry(rf.lastApplied+1, rf.commitIndex+1)
-					rf.lastApplied = rf.commitIndex
-				}
+			// go func() { // receiver may block sender, so use another goroutine
+			rf.mu.Lock()
+			var commandValid bool
+			var entries []LogEntry
 
-				rf.persist()
+			// Check local server state consistency between index.
 
-				rf.mu.Unlock()
+			// Data already been snapshotted, notify kvraft to read snapshot.
+			if rf.lastApplied < rf.lastIncludedIndex {
+				commandValid = false
+				rf.lastApplied = rf.lastIncludedIndex
+				entries = []LogEntry{{LogIndex: rf.lastIncludedIndex, LogTerm: rf.log[0].LogTerm, Command: "InstallSnapshot"}}
+			} else if rf.lastApplied < rf.logIndex && rf.lastApplied < rf.commitIndex {
+				// Get newly committed entries since last applied. (commit index always <= applied)
+				commandValid = true
+				entries = rf.getRangeEntry(rf.lastApplied+1, rf.commitIndex+1)
+				rf.lastApplied = rf.commitIndex
+			}
 
-				// Notify rf.applyCh
-				for _, entry := range entries {
-					rf.applyCh <- ApplyMsg{CommandValid: commandValid, CommandIndex: entry.LogIndex, CommandTerm: entry.LogTerm, Command: entry.Command}
-				}
-			}()
+			rf.persist()
+
+			rf.mu.Unlock()
+
+			// Notify rf.applyCh
+			for _, entry := range entries {
+				rf.applyCh <- ApplyMsg{CommandValid: commandValid, CommandIndex: entry.LogIndex, CommandTerm: entry.LogTerm, Command: entry.Command}
+			}
+			// }()
 		}
 	}
 }
 
+// Make creates a new raft server instance.
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{}
@@ -504,7 +552,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.shutdown = make(chan struct{})
 
 	// Using buffered channel also works, without the need of goroutine in receiver.
-	rf.notifyApplyCh = make(chan struct{})
+	rf.notifyApplyCh = make(chan struct{}, 1000) // large enough
 
 	rf.electionTimer = time.NewTimer(newRandDuration(electionTimeout))
 

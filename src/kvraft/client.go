@@ -11,8 +11,7 @@ import (
 const RetryInterval = time.Duration(125 * time.Millisecond)
 
 type Clerk struct {
-	servers []*labrpc.ClientEnd
-	// You will have to modify this struct.
+	servers    []*labrpc.ClientEnd
 	clientId   int64
 	RequestSeq int
 	leaderId   int
@@ -25,30 +24,20 @@ func nrand() int64 {
 	return x
 }
 
+func (ck *Clerk) Call(rpcname string, args interface{}, reply interface{}) bool {
+	return ck.servers[ck.leaderId].Call(rpcname, args, reply)
+}
+
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
-	// You'll have to add code here.
 	ck.clientId = nrand()
 	ck.RequestSeq = 0
 	ck.leaderId = 0
 	return ck
 }
 
-//
-// fetch the current value for a key.
-// returns "" if the key does not exist.
-// keeps trying forever in the face of all other errors.
-//
-// you can send an RPC with code like this:
-// ok := ck.servers[i].Call("KVServer.Get", &args, &reply)
-//
-// the types of args and reply (including whether they are pointers)
-// must match the declared types of the RPC handler function's
-// arguments. and reply must be passed as a pointer.
-//
 func (ck *Clerk) Get(key string) string {
-	// You will have to modify this function.
 	args := GetArgs{key}
 	for {
 		var reply GetReply
@@ -56,27 +45,15 @@ func (ck *Clerk) Get(key string) string {
 			DPrintf("[%d GET key %s reply %#v]", ck.leaderId, args.Key, reply)
 			return reply.Value
 		}
-		// try contact next server
 		ck.leaderId = (ck.leaderId + 1) % len(ck.servers)
 		time.Sleep(RetryInterval)
 	}
-	// return ""
+	return ""
 }
 
-//
-// shared by Put and Append.
-//
-// you can send an RPC with code like this:
-// ok := ck.servers[i].Call("KVServer.PutAppend", &args, &reply)
-//
-// the types of args and reply (including whether they are pointers)
-// must match the declared types of the RPC handler function's
-// arguments. and reply must be passed as a pointer.
-//
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	// You will have to modify this function.
 	ck.RequestSeq++
-	args := PutAppendArgs{ClientId: ck.clientId, RequestSeq: ck.RequestSeq, Key: key, Value: value, Op: op}
+	args := PutAppendArgs{ck.clientId, ck.RequestSeq, key, value, op}
 	for {
 		var reply PutAppendReply
 		if ck.Call("KVServer.PutAppend", &args, &reply) && reply.Err == OK {
@@ -97,8 +74,4 @@ func (ck *Clerk) Put(key string, value string) {
 }
 func (ck *Clerk) Append(key string, value string) {
 	ck.PutAppend(key, value, "Append")
-}
-
-func (ck *Clerk) Call(rpcname string, args interface{}, reply interface{}) bool {
-	return ck.servers[ck.leaderId].Call(rpcname, args, reply)
 }

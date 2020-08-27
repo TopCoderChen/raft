@@ -6,9 +6,10 @@ import (
 	"sync"
 	"time"
 
+	"../raft"
+
 	"../labgob"
 	"../labrpc"
-	"../raft"
 )
 
 const StartTimeoutInterval = time.Duration(3 * time.Second)
@@ -28,7 +29,7 @@ type notifyArgs struct {
 }
 
 type KVServer struct {
-	mu           sync.Mutex
+	sync.Mutex
 	me           int
 	maxraftstate int // snapshot if log grows this big
 
@@ -43,14 +44,6 @@ type KVServer struct {
 	notifyChanMap map[int]chan notifyArgs // use index returned from raft as key
 }
 
-func (kv *KVServer) Lock() {
-	kv.mu.Lock()
-}
-
-func (kv *KVServer) Unlock() {
-	kv.mu.Unlock()
-}
-
 func (kv *KVServer) notifyIfPresent(index int, reply notifyArgs) {
 	if ch, ok := kv.notifyChanMap[index]; ok {
 		delete(kv.notifyChanMap, index)
@@ -58,7 +51,6 @@ func (kv *KVServer) notifyIfPresent(index int, reply notifyArgs) {
 	}
 }
 
-// Call raft.start()
 func (kv *KVServer) start(args interface{}) (Err, string) {
 	index, term, ok := kv.rf.Start(args)
 	if !ok {
@@ -83,15 +75,6 @@ func (kv *KVServer) start(args interface{}) (Err, string) {
 	}
 	return OK, ""
 }
-
-func (kv *KVServer) snapshotIfNeeded(lastCommandIndex int) {
-	var threshold = int(SnapshotThreshold * float64(kv.maxraftstate))
-	if kv.maxraftstate != -1 && kv.persister.RaftStateSize() >= threshold {
-		kv.snapshot(lastCommandIndex)
-	}
-}
-
-// Tell Raft to snapshot.
 func (kv *KVServer) snapshot(lastCommandIndex int) {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
@@ -99,6 +82,13 @@ func (kv *KVServer) snapshot(lastCommandIndex int) {
 	e.Encode(kv.data)
 	snapshot := w.Bytes()
 	kv.rf.PersistAndSaveSnapshot(lastCommandIndex, snapshot)
+}
+
+func (kv *KVServer) snapshotIfNeeded(lastCommandIndex int) {
+	var threshold = int(SnapshotThreshold * float64(kv.maxraftstate))
+	if kv.maxraftstate != -1 && kv.persister.RaftStateSize() >= threshold {
+		kv.snapshot(lastCommandIndex)
+	}
 }
 
 func (kv *KVServer) readSnapshot() {
@@ -148,16 +138,11 @@ func (kv *KVServer) apply(msg raft.ApplyMsg) {
 }
 
 func (kv *KVServer) run() {
-	// Ask gap (entries) information from raft at initial stage.
 	go kv.rf.Replay(1)
-
 	for {
 		select {
-		// message from Raft
 		case msg := <-kv.applyCh:
 			kv.Lock()
-			// If command is not valid, it's for internal sync purposes, not for external-client command.
-			// Valid command means it's from actual client request.
 			if msg.CommandValid {
 				kv.apply(msg)
 			} else if cmd, ok := msg.Command.(string); ok {
@@ -201,8 +186,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.data = make(map[string]string)
 	kv.cache = make(map[int64]int)
 	kv.notifyChanMap = make(map[int]chan notifyArgs)
-
 	go kv.run()
-
 	return kv
 }

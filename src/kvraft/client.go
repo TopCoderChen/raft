@@ -1,13 +1,21 @@
 package kvraft
 
-import "../labrpc"
-import "crypto/rand"
-import "math/big"
+import (
+	"crypto/rand"
+	"math/big"
+	"time"
 
+	"../labrpc"
+)
+
+const RetryInterval = time.Duration(125 * time.Millisecond)
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+	clientId   int64
+	RequestSeq int
+	leaderId   int
 }
 
 func nrand() int64 {
@@ -21,6 +29,9 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
+	ck.clientId = nrand()
+	ck.RequestSeq = 0
+	ck.leaderId = 0
 	return ck
 }
 
@@ -37,9 +48,19 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
-
 	// You will have to modify this function.
-	return ""
+	args := GetArgs{key}
+	for {
+		var reply GetReply
+		if ck.Call("KVServer.Get", &args, &reply) && reply.Err == OK {
+			DPrintf("[%d GET key %s reply %#v]", ck.leaderId, args.Key, reply)
+			return reply.Value
+		}
+		// try contact next server
+		ck.leaderId = (ck.leaderId + 1) % len(ck.servers)
+		time.Sleep(RetryInterval)
+	}
+	// return ""
 }
 
 //
@@ -54,6 +75,21 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
+	ck.RequestSeq++
+	args := PutAppendArgs{ClientId: ck.clientId, RequestSeq: ck.RequestSeq, Key: key, Value: value, Op: op}
+	for {
+		var reply PutAppendReply
+		if ck.Call("KVServer.PutAppend", &args, &reply) && reply.Err == OK {
+			if op == "Put" {
+				DPrintf("[%d seq %d PUT key %s value %s reply %v]", ck.leaderId, args.RequestSeq, args.Key, args.Value, reply)
+			} else {
+				DPrintf("[%d seq %d APPEND key %s value %s reply %v]", ck.leaderId, args.RequestSeq, args.Key, args.Value, reply)
+			}
+			return
+		}
+		ck.leaderId = (ck.leaderId + 1) % len(ck.servers)
+		time.Sleep(RetryInterval)
+	}
 }
 
 func (ck *Clerk) Put(key string, value string) {
@@ -61,4 +97,8 @@ func (ck *Clerk) Put(key string, value string) {
 }
 func (ck *Clerk) Append(key string, value string) {
 	ck.PutAppend(key, value, "Append")
+}
+
+func (ck *Clerk) Call(rpcname string, args interface{}, reply interface{}) bool {
+	return ck.servers[ck.leaderId].Call(rpcname, args, reply)
 }

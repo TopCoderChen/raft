@@ -109,7 +109,7 @@ func (rf *Raft) getPersistState() []byte {
 	e := labgob.NewEncoder(w)
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.votedFor)
-	// e.Encode(rf.lastIncludedIndex)
+	e.Encode(rf.lastIncludedIndex)
 	e.Encode(rf.logIndex)
 	e.Encode(rf.commitIndex)
 	e.Encode(rf.lastApplied)
@@ -137,10 +137,10 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
-	currentTerm, votedFor, logIndex, commitIndex, lastApplied := 0, 0, 0, 0, 0
+	currentTerm, votedFor, logIndex, commitIndex, lastApplied, lastIncludedIndex := 0, 0, 0, 0, 0, 0
 	if d.Decode(&currentTerm) != nil ||
 		d.Decode(&votedFor) != nil ||
-		// d.Decode(&lastIncludedIndex) != nil ||
+		d.Decode(&lastIncludedIndex) != nil ||
 		d.Decode(&logIndex) != nil ||
 		d.Decode(&commitIndex) != nil ||
 		d.Decode(&lastApplied) != nil ||
@@ -148,6 +148,35 @@ func (rf *Raft) readPersist(data []byte) {
 		log.Fatal("!!! \n\n Error unmarshaling raft state \n\n")
 	}
 	rf.currentTerm, rf.votedFor, rf.logIndex, rf.commitIndex, rf.lastApplied = currentTerm, votedFor, logIndex, commitIndex, lastApplied
+	rf.lastIncludedIndex = lastIncludedIndex
+}
+
+// When kvraft starts, it needs replay all the applied commands in raft, starting from last-snapshotted-index.
+func (rf *Raft) Replay(startIndex int) {
+	rf.mu.Lock()
+	if startIndex <= rf.lastIncludedIndex {
+		rf.applyCh <- ApplyMsg{CommandValid: false, CommandIndex: rf.log[0].LogIndex, CommandTerm: rf.log[0].LogTerm, Command: "InstallSnapshot"}
+		startIndex = rf.lastIncludedIndex + 1
+		rf.lastApplied = Max(rf.lastApplied, rf.lastIncludedIndex)
+	}
+	entries := append([]LogEntry{}, rf.log[rf.getOffsetIndex(startIndex):rf.getOffsetIndex(rf.lastApplied+1)]...)
+	rf.mu.Unlock()
+	for i := 0; i < len(entries); i++ {
+		rf.applyCh <- ApplyMsg{CommandValid: true, CommandIndex: entries[i].LogIndex, CommandTerm: entries[i].LogTerm, Command: entries[i].Command}
+	}
+	rf.applyCh <- ApplyMsg{CommandValid: false, CommandIndex: -1, CommandTerm: -1, Command: "ReplayDone"}
+}
+
+func (rf *Raft) PersistAndSaveSnapshot(lastIncludedIndex int, snapshot []byte) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if lastIncludedIndex > rf.lastIncludedIndex {
+		truncationStartIndex := rf.getOffsetIndex(lastIncludedIndex)
+		rf.log = append([]LogEntry{}, rf.log[truncationStartIndex:]...) // log entry previous at lastIncludedIndex at 0 now
+		rf.lastIncludedIndex = lastIncludedIndex
+		data := rf.getPersistState()
+		rf.persister.SaveStateAndSnapshot(data, snapshot)
+	}
 }
 
 // because snapshot will replace committed log entries in log

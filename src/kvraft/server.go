@@ -1,77 +1,184 @@
 package kvraft
 
 import (
+	"bytes"
+	"log"
+	"sync"
+	"time"
+
 	"../labgob"
 	"../labrpc"
-	"log"
 	"../raft"
-	"sync"
-	"sync/atomic"
 )
 
-const Debug = 0
+const StartTimeoutInterval = time.Duration(3 * time.Second)
+const SnapshotThreshold = 1.5
 
-func DPrintf(format string, a ...interface{}) (n int, err error) {
-	if Debug > 0 {
-		log.Printf(format, a...)
-	}
-	return
+func init() {
+	labgob.Register(GetArgs{})
+	labgob.Register(PutAppendArgs{})
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 }
 
-
-type Op struct {
-	// Your definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
+// used to notify RPC handler
+type notifyArgs struct {
+	Term  int
+	Value string
+	Err   Err
 }
 
 type KVServer struct {
-	mu      sync.Mutex
-	me      int
-	rf      *raft.Raft
-	applyCh chan raft.ApplyMsg
-	dead    int32 // set by Kill()
-
+	mu           sync.Mutex
+	me           int
 	maxraftstate int // snapshot if log grows this big
 
-	// Your definitions here.
+	rf        *raft.Raft
+	persister *raft.Persister // Object to hold this peer's persisted state
+
+	applyCh  chan raft.ApplyMsg
+	shutdown chan struct{}
+
+	data          map[string]string       // storing Key-Value pair
+	cache         map[int64]int           // cache put/append requests that server have processed, use request id as key
+	notifyChanMap map[int]chan notifyArgs // use index returned from raft as key
 }
 
+func (kv *KVServer) Lock() {
+	kv.mu.Lock()
+}
+
+func (kv *KVServer) Unlock() {
+	kv.mu.Unlock()
+}
+
+func (kv *KVServer) notifyIfPresent(index int, reply notifyArgs) {
+	if ch, ok := kv.notifyChanMap[index]; ok {
+		delete(kv.notifyChanMap, index)
+		ch <- reply
+	}
+}
+
+// Call raft.start()
+func (kv *KVServer) start(args interface{}) (Err, string) {
+	index, term, ok := kv.rf.Start(args)
+	if !ok {
+		return ErrWrongLeader, ""
+	}
+	kv.Lock()
+	notifyCh := make(chan notifyArgs, 1)
+	kv.notifyChanMap[index] = notifyCh
+	kv.Unlock()
+	select {
+	case <-time.After(StartTimeoutInterval):
+		kv.Lock()
+		delete(kv.notifyChanMap, index)
+		kv.Unlock()
+		return ErrWrongLeader, ""
+	case result := <-notifyCh:
+		if result.Term != term {
+			return ErrWrongLeader, ""
+		} else {
+			return result.Err, result.Value
+		}
+	}
+	return OK, ""
+}
+
+func (kv *KVServer) snapshotIfNeeded(lastCommandIndex int) {
+	var threshold = int(SnapshotThreshold * float64(kv.maxraftstate))
+	if kv.maxraftstate != -1 && kv.persister.RaftStateSize() >= threshold {
+		kv.snapshot(lastCommandIndex)
+	}
+}
+
+// Tell Raft to snapshot.
+func (kv *KVServer) snapshot(lastCommandIndex int) {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(kv.cache)
+	e.Encode(kv.data)
+	snapshot := w.Bytes()
+	kv.rf.PersistAndSaveSnapshot(lastCommandIndex, snapshot)
+}
+
+func (kv *KVServer) readSnapshot() {
+	snapshot := kv.persister.ReadSnapshot()
+	if snapshot == nil || len(snapshot) < 1 {
+		return
+	}
+	r := bytes.NewBuffer(snapshot)
+	d := labgob.NewDecoder(r)
+	if d.Decode(&kv.cache) != nil ||
+		d.Decode(&kv.data) != nil {
+		log.Fatal("Error in reading snapshot")
+	}
+}
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	// Your code here.
+	reply.Err, reply.Value = kv.start(args.copy())
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	// Your code here.
+	reply.Err, _ = kv.start(args.copy())
 }
 
-//
-// the tester calls Kill() when a KVServer instance won't
-// be needed again. for your convenience, we supply
-// code to set rf.dead (without needing a lock),
-// and a killed() method to test rf.dead in
-// long-running loops. you can also add your own
-// code to Kill(). you're not required to do anything
-// about this, but it may be convenient (for example)
-// to suppress debug output from a Kill()ed instance.
-//
 func (kv *KVServer) Kill() {
-	atomic.StoreInt32(&kv.dead, 1)
 	kv.rf.Kill()
-	// Your code here, if desired.
+	close(kv.shutdown)
 }
 
-func (kv *KVServer) killed() bool {
-	z := atomic.LoadInt32(&kv.dead)
-	return z == 1
+func (kv *KVServer) apply(msg raft.ApplyMsg) {
+	result := notifyArgs{Term: msg.CommandTerm, Value: "", Err: OK}
+	if arg, ok := msg.Command.(GetArgs); ok {
+		result.Value = kv.data[arg.Key]
+	} else if arg, ok := msg.Command.(PutAppendArgs); ok {
+		if kv.cache[arg.ClientId] < arg.RequestSeq {
+			if arg.Op == "Put" {
+				kv.data[arg.Key] = arg.Value
+			} else {
+				kv.data[arg.Key] += arg.Value
+			}
+			kv.cache[arg.ClientId] = arg.RequestSeq
+		}
+	} else {
+		result.Err = ErrWrongLeader
+	}
+	kv.notifyIfPresent(msg.CommandIndex, result)
+	kv.snapshotIfNeeded(msg.CommandIndex)
+}
+
+func (kv *KVServer) run() {
+	// Ask gap (entries) information from raft at initial stage.
+	go kv.rf.Replay(1)
+
+	for {
+		select {
+		// message from Raft
+		case msg := <-kv.applyCh:
+			kv.Lock()
+			// If command is not valid, it's for internal sync purposes, not for external-client command.
+			// Valid command means it's from actual client request.
+			if msg.CommandValid {
+				kv.apply(msg)
+			} else if cmd, ok := msg.Command.(string); ok {
+				if cmd == "InstallSnapshot" {
+					kv.readSnapshot()
+				} else if cmd == "NewLeader" {
+					kv.rf.Start("")
+				}
+			}
+			kv.Unlock()
+		case <-kv.shutdown:
+			return
+		}
+	}
 }
 
 //
 // servers[] contains the ports of the set of
 // servers that will cooperate via Raft to
-// form the fault-tolerant key/value service.
-// me is the index of the current server in servers[].
+// form the fault-tolerant Key/Value service.
+// me is the Index of the current server in servers[].
 // the k/v server should store snapshots through the underlying Raft
 // implementation, which should call persister.SaveStateAndSnapshot() to
 // atomically save the Raft state along with the snapshot.
@@ -82,20 +189,20 @@ func (kv *KVServer) killed() bool {
 // for any long-running work.
 //
 func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int) *KVServer {
-	// call labgob.Register on structures you want
-	// Go's RPC library to marshall/unmarshall.
-	labgob.Register(Op{})
-
 	kv := new(KVServer)
 	kv.me = me
 	kv.maxraftstate = maxraftstate
+	kv.persister = persister
 
-	// You may need initialization code here.
-
-	kv.applyCh = make(chan raft.ApplyMsg)
+	kv.applyCh = make(chan raft.ApplyMsg, 1000)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	kv.shutdown = make(chan struct{})
 
-	// You may need initialization code here.
+	kv.data = make(map[string]string)
+	kv.cache = make(map[int64]int)
+	kv.notifyChanMap = make(map[int]chan notifyArgs)
+
+	go kv.run()
 
 	return kv
 }

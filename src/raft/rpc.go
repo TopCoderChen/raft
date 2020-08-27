@@ -122,6 +122,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 		if rf.getEntry(prevLogIndex+1+i).LogTerm != args.Entries[i].LogTerm {
 			// Find the turning point of diff !
+			rf.logIndex = prevLogIndex + 1 + i
 			truncationEndIndex := rf.getOffsetIndex(rf.logIndex)
 			rf.log = append(rf.log[:truncationEndIndex]) // delete any conflicting log entries
 			break

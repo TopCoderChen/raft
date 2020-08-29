@@ -500,7 +500,7 @@ func (rf *Raft) apply() {
 
 			// Check local server state consistency between index.
 
-			// Data already been snapshotted, notify kvraft to read snapshot.
+			// Data already been snapshotted, notify kvraft or shardkv to read & install snapshot.
 			if rf.lastApplied < rf.lastIncludedIndex {
 				commandValid = false
 				rf.lastApplied = rf.lastIncludedIndex

@@ -21,6 +21,21 @@ import "log"
 
 // The number of shards.
 const NShards = 10
+const (
+	OK          = "OK"
+	WrongLeader = true // used in RPC reply
+	Ok          = false
+)
+const Debug = 0
+
+func DPrintf(format string, a ...interface{}) (n int, err error) {
+	if Debug > 0 {
+		log.Printf(format, a...)
+	}
+	return
+}
+
+type Err string
 
 // A configuration -- an assignment of shards to groups.
 // Please don't change this.
@@ -30,13 +45,13 @@ type Config struct {
 	Groups map[int][]string // gid -> servers[]
 }
 
-const (
-	OK          = "OK"
-	WrongLeader = true // used in RPC reply
-	Ok          = false
-)
-
-type Err string
+func (config Config) Copy() Config {
+	newConfig := Config{Num: config.Num, Shards: config.Shards, Groups: make(map[int][]string)}
+	for gid, servers := range config.Groups {
+		newConfig.Groups[gid] = append([]string{}, servers...)
+	}
+	return newConfig
+}
 
 type JoinArgs struct {
 	Servers    map[int][]string // new GID -> servers mappings
@@ -100,13 +115,4 @@ func (arg *MoveArgs) copy() MoveArgs {
 
 func (arg *QueryArgs) copy() QueryArgs {
 	return QueryArgs{arg.Num}
-}
-
-const Debug = 0
-
-func DPrintf(format string, a ...interface{}) (n int, err error) {
-	if Debug > 0 {
-		log.Printf(format, a...)
-	}
-	return
 }

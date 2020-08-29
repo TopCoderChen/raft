@@ -132,6 +132,8 @@ func (sm *ShardMaster) appendNewConfig(newConfig Config) {
 
 func (sm *ShardMaster) apply(msg raft.ApplyMsg) {
 	reply := notifyArgs{Term: msg.CommandTerm, Args: ""}
+
+	// Use Type Assertion.
 	if arg, ok := msg.Command.(JoinArgs); ok {
 		sm.applyJoin(arg)
 	} else if arg, ok := msg.Command.(LeaveArgs); ok {

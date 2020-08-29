@@ -1,5 +1,7 @@
 package shardkv
 
+// Lab 4B code is similar to Lab 3.
+
 //
 // client code to talk to a sharded key/value service.
 //
@@ -13,6 +15,8 @@ import "crypto/rand"
 import "math/big"
 import "../shardmaster"
 import "time"
+
+const RetryInterval = time.Duration(100 * time.Millisecond)
 
 //
 // which shard is a key in?
@@ -35,11 +39,16 @@ func nrand() int64 {
 	return x
 }
 
+// client -> master (for config) => client -> replica-group(set of shardkv-servers)
 type Clerk struct {
 	sm       *shardmaster.Clerk
 	config   shardmaster.Config
 	make_end func(string) *labrpc.ClientEnd
 	// You will have to modify this struct.
+
+	// Your storage system must provide a linearizable interface to applications that use its client interface.
+	clientId      int64
+	lastRequestId int64
 }
 
 //
@@ -56,6 +65,9 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	ck.sm = shardmaster.MakeClerk(masters)
 	ck.make_end = make_end
 	// You'll have to add code here.
+	ck.clientId = nrand()
+	ck.lastRequestId = 0
+	ck.config = ck.sm.Query(-1)
 	return ck
 }
 
@@ -87,7 +99,7 @@ func (ck *Clerk) Get(key string) string {
 				// ... not ok, or ErrWrongLeader
 			}
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(RetryInterval)
 		// ask master for the latest configuration.
 		ck.config = ck.sm.Query(-1)
 	}
@@ -105,10 +117,10 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args.Value = value
 	args.Op = op
 
-
 	for {
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
+		args.ConfigNum = ck.config.Num
 		if servers, ok := ck.config.Groups[gid]; ok {
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
@@ -123,8 +135,9 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 				// ... not ok, or ErrWrongLeader
 			}
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(RetryInterval)
 		// ask master for the latest configuration.
+		// TODO
 		ck.config = ck.sm.Query(-1)
 	}
 }

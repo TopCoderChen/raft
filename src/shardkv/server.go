@@ -11,7 +11,8 @@ import "sync"
 import "../labgob"
 import "time"
 import "log"
-import "bytes"
+
+// import "bytes"
 
 const PollInterval = time.Duration(250 * time.Millisecond)
 const PullInterval = time.Duration(150 * time.Millisecond)
@@ -71,57 +72,6 @@ type ShardKV struct {
 	cleanTimer *time.Timer // when time out, if server is leader and cleaningShards is not empty, clean shard in other group
 }
 
-func (kv *ShardKV) snapshot(lastCommandIndex int) {
-	w := new(bytes.Buffer)
-	e := labgob.NewEncoder(w)
-
-	e.Encode(kv.ownShards)
-	e.Encode(kv.migratingShards)
-	e.Encode(kv.waitingShards)
-	e.Encode(kv.cleaningShards)
-	e.Encode(kv.historyConfigs)
-	e.Encode(kv.config)
-	e.Encode(kv.cache)
-	e.Encode(kv.data)
-
-	snapshot := w.Bytes()
-	kv.rf.PersistAndSaveSnapshot(lastCommandIndex, snapshot)
-}
-
-func (kv *ShardKV) snapshotIfNeeded(lastCommandIndex int) {
-	var threshold = int(SnapshotThreshold * float64(kv.maxraftstate))
-	if kv.maxraftstate != -1 && kv.persister.RaftStateSize() >= threshold {
-		kv.snapshot(lastCommandIndex)
-	}
-}
-
-func (kv *ShardKV) readSnapshot() {
-	snapshot := kv.persister.ReadSnapshot()
-	if snapshot == nil || len(snapshot) < 1 {
-		return
-	}
-	r := bytes.NewBuffer(snapshot)
-	d := labgob.NewDecoder(r)
-
-	var config shardmaster.Config
-	ownShards, migratingShards, waitingShards, cleaningShards := make(IntSet), make(map[int]map[int]MigrationData), make(map[int]int), make(map[int]IntSet)
-	historyConfigs, cache, data := make([]shardmaster.Config, 0), make(map[int64]string), make(map[string]string)
-
-	if d.Decode(&ownShards) != nil ||
-		d.Decode(&migratingShards) != nil ||
-		d.Decode(&waitingShards) != nil ||
-		d.Decode(&cleaningShards) != nil ||
-		d.Decode(&historyConfigs) != nil ||
-		d.Decode(&config) != nil ||
-		d.Decode(&cache) != nil ||
-		d.Decode(&data) != nil {
-		log.Fatal("Error in reading snapshot")
-	}
-	kv.config = config
-	kv.ownShards, kv.migratingShards, kv.waitingShards, kv.cleaningShards = ownShards, migratingShards, waitingShards, cleaningShards
-	kv.historyConfigs, kv.cache, kv.data = historyConfigs, cache, data
-}
-
 // Unified helper when receiving Get() & PutAppend() RPCs.
 func (kv *ShardKV) start(configNum int, args interface{}) (Err, string) {
 	kv.mu.Lock()
@@ -164,51 +114,6 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
 	reply.Err, _ = kv.start(args.ConfigNum, args.copy())
-}
-
-// Another server has requested the shard specified in the args.
-// Put the shard to be migrated in the reply (deep copied).
-func (kv *ShardKV) ShardMigration(args *ShardMigrationArgs, reply *ShardMigrationReply) {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
-	reply.Err, reply.Shard, reply.ConfigNum = OK, args.Shard, args.ConfigNum
-	if args.ConfigNum >= kv.config.Num {
-		reply.Err = ErrWrongGroup
-		return
-	}
-	reply.MigrationData = MigrationData{Data: make(map[string]string), Cache: make(map[int64]string)}
-	// migratingShards: config number -> shard -> migration data
-	if v, ok := kv.migratingShards[args.ConfigNum]; ok {
-		if migrationData, ok := v[args.Shard]; ok {
-			for k, v := range migrationData.Data {
-				reply.MigrationData.Data[k] = v
-			}
-			for k, v := range migrationData.Cache {
-				reply.MigrationData.Cache[k] = v
-			}
-		}
-	}
-}
-
-// When the other group finishes shard migration,
-// it uses this RPC handler to clean up useless shard in source (this local) group.
-func (kv *ShardKV) ShardCleanup(args *ShardCleanupArgs, reply *ShardCleanupReply) {
-	if _, isLeader := kv.rf.GetState(); !isLeader {
-		reply.Err = ErrWrongLeader
-		return
-	}
-	reply.Err = OK
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
-	if _, ok := kv.migratingShards[args.ConfigNum]; ok {
-		if _, ok := kv.migratingShards[args.ConfigNum][args.Shard]; ok {
-			// avoid deadlock
-			kv.mu.Unlock()
-			result, _ := kv.start(kv.getConfigNum(), args.copy())
-			reply.Err = result
-			kv.mu.Lock()
-		}
-	}
 }
 
 func (kv *ShardKV) getConfigNum() int {

@@ -64,6 +64,7 @@ func (sm *ShardMaster) applyLeave(arg LeaveArgs) {
 		delete(newConfig.Groups, gid)
 		leaveGIDs[gid] = struct{}{}
 	}
+
 	if len(newConfig.Groups) == 0 { // remove all gid
 		newConfig.Shards = [NShards]int{}
 	} else {
@@ -105,6 +106,7 @@ func (sm *ShardMaster) applyLeave(arg LeaveArgs) {
 	sm.appendNewConfig(newConfig)
 }
 
+// Change the assignment of shard to GID.
 func (sm *ShardMaster) applyMove(arg MoveArgs) {
 	if sm.cache[arg.ClientId] >= arg.RequestSeq { // duplicate req.
 		return

@@ -1,16 +1,10 @@
 package shardkv
 
-import "../shardmaster"
-
-// import "labrpc"
-// import "raft"
-// import "sync"
 import (
 	"../labgob"
+	"../shardmaster"
 	"bytes"
 	"log"
-	// _ "net/http/pprof"
-	// "time"
 )
 
 func (kv *ShardKV) snapshot(lastCommandIndex int) {

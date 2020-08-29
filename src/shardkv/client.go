@@ -20,8 +20,6 @@ const RetryInterval = time.Duration(100 * time.Millisecond)
 
 //
 // which shard is a key in?
-// please use this function,
-// and please do not change it.
 //
 func key2shard(key string) int {
 	shard := 0

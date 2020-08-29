@@ -12,8 +12,6 @@ import "../labgob"
 import "time"
 import "log"
 
-// import "bytes"
-
 const PollInterval = time.Duration(250 * time.Millisecond)
 const PullInterval = time.Duration(150 * time.Millisecond)
 const CleanInterval = time.Duration(150 * time.Millisecond)

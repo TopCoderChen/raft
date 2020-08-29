@@ -1,5 +1,7 @@
 package shardmaster
 
+import "log"
+
 //
 // Master shard server: assigns shards to replication groups.
 //
@@ -29,13 +31,17 @@ type Config struct {
 }
 
 const (
-	OK = "OK"
+	OK          = "OK"
+	WrongLeader = true // used in RPC reply
+	Ok          = false
 )
 
 type Err string
 
 type JoinArgs struct {
-	Servers map[int][]string // new GID -> servers mappings
+	Servers    map[int][]string // new GID -> servers mappings
+	ClientId   int64            // de-duplicate
+	RequestSeq int              // de-duplicate
 }
 
 type JoinReply struct {
@@ -44,7 +50,9 @@ type JoinReply struct {
 }
 
 type LeaveArgs struct {
-	GIDs []int
+	GIDs       []int
+	ClientId   int64 // de-duplicate
+	RequestSeq int   // de-duplicate
 }
 
 type LeaveReply struct {
@@ -53,8 +61,10 @@ type LeaveReply struct {
 }
 
 type MoveArgs struct {
-	Shard int
-	GID   int
+	Shard      int
+	GID        int
+	ClientId   int64 // de-duplicate
+	RequestSeq int   // de-duplicate
 }
 
 type MoveReply struct {
@@ -70,4 +80,33 @@ type QueryReply struct {
 	WrongLeader bool
 	Err         Err
 	Config      Config
+}
+
+func (arg *JoinArgs) copy() JoinArgs {
+	result := JoinArgs{ClientId: arg.ClientId, RequestSeq: arg.RequestSeq, Servers: make(map[int][]string)}
+	for gid, server := range arg.Servers {
+		result.Servers[gid] = append([]string{}, server...)
+	}
+	return result
+}
+
+func (arg *LeaveArgs) copy() LeaveArgs {
+	return LeaveArgs{ClientId: arg.ClientId, RequestSeq: arg.RequestSeq, GIDs: append([]int{}, arg.GIDs...)}
+}
+
+func (arg *MoveArgs) copy() MoveArgs {
+	return MoveArgs{ClientId: arg.ClientId, RequestSeq: arg.RequestSeq, Shard: arg.Shard, GID: arg.GID}
+}
+
+func (arg *QueryArgs) copy() QueryArgs {
+	return QueryArgs{arg.Num}
+}
+
+const Debug = 0
+
+func DPrintf(format string, a ...interface{}) (n int, err error) {
+	if Debug > 0 {
+		log.Printf(format, a...)
+	}
+	return
 }

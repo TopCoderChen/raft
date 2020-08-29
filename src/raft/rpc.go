@@ -1,5 +1,7 @@
 package raft
 
+// import "log"
+
 // Put related RPC handlers in one place.
 
 // Reset timer inside each handler.
@@ -72,6 +74,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	// if args == nil {
+	// 	log.Printf("\n\n !!! \n\n")
+	// }
 	if rf.currentTerm > args.Term {
 		// RPC call comes from an illegitimate leader
 		reply.Term, reply.Success = rf.currentTerm, false

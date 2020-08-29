@@ -5,10 +5,19 @@ import "../raft"
 import "../labrpc"
 import "sync"
 
-// import "../labgob"
+import "../labgob"
 import "time"
 
 const RaftTimeout = time.Duration(3 * time.Second)
+
+// Without this init(), Lab 4A won't pass
+func init() {
+	labgob.Register(JoinArgs{})
+	labgob.Register(LeaveArgs{})
+	labgob.Register(MoveArgs{})
+	labgob.Register(QueryArgs{})
+	// log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+}
 
 // This is the master server for storing configs, contacted by kvraft servers.
 type ShardMaster struct {
@@ -277,7 +286,6 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 	sm.configs = make([]Config, 1)
 	sm.configs[0].Groups = map[int][]string{}
 
-	// labgob.Register(Op{})
 	sm.applyCh = make(chan raft.ApplyMsg)
 	sm.rf = raft.Make(servers, me, persister, sm.applyCh)
 

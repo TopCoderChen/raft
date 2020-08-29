@@ -65,8 +65,8 @@ func (sm *ShardMaster) notifyIfPresent(index int, reply notifyArgs) {
 // Send the command to Raft Start().
 // Flow: Join/Leave -> Raft -> applyCh -> apply() -> notifyIfPresent -> notifyChanMap
 func (sm *ShardMaster) start(arg interface{}) (bool, interface{}) {
-	index, term, ok := sm.rf.Start(arg)
-	if !ok {
+	index, term, isleader := sm.rf.Start(arg)
+	if !isleader {
 		return WrongLeader, struct{}{}
 	}
 	sm.mu.Lock()
